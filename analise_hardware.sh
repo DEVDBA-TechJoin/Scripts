@@ -1,4 +1,10 @@
-ores para o terminal
+# Verifica se o usuário é root
+if [ "$EUID" -ne 0 ]; then
+    echo -e "\e[31m[ERRO] Este script deve ser executado como root.\e[0m"
+    exit 1
+fi
+
+#Cores para o terminal
 RED="\e[31m"
 GREEN="\e[32m"
 YELLOW="\e[33m"
