@@ -1,3 +1,4 @@
+
 # Verifica se o usuário é root
 if [ "$EUID" -ne 0 ]; then
     echo -e "\e[31m[ERRO] Este script deve ser executado como root.\e[0m"
@@ -221,9 +222,25 @@ fi
 
 executar_etapa "LOGS DE DESLIGAMENTO E REBOOT" bash -c 'last -F -n20 -x shutdown reboot || echo "Nenhum evento encontrado."'
 
+# Verificação de arquivos hs_err no Wildfly
+executar_etapa "VERIFICAÇÃO DE ARQUIVOS hs_err NO WILDFLY" bash -c '
+if [ -d /usr/wildfly/bin ]; then
+    echo "[INFO] Acessando diretório /usr/wildfly/bin..."
+    cd /usr/wildfly/bin || exit 1
+    echo "[INFO] Listando arquivos contendo hs_err:"
+    ls -lsth | grep "hs_err" || echo "Nenhum arquivo hs_err encontrado."
+else
+    echo "[ERRO] Diretório /usr/wildfly/bin não encontrado."
+fi
+'
+
 # Hash e tempo final
 echo -e "${GREEN}=== Relatório final salvo em: $RELATORIO ===${RESET}"
-sha256sum "$RELATORIO" | tee -a "$RELATORIO"
-echo -e "${CYAN}Tempo total de execução: ${SECONDS} segundos${RESET}"
-read -rp "Pressione Enter para sair..." dummy
 
+# Explicação do hash
+echo -e "${CYAN}[INFO] Abaixo está o md5 do relatório.${RESET}"
+echo -e "${CYAN}[INFO] Ele serve para verificar a integridade e autenticidade do conteúdo.${RESET}"
+echo -e "${CYAN}[INFO] Se o relatório for alterado, esse código mudará completamente.${RESET}"
+
+# Geração e exibição do hash
+md5sum "$RELATORIO" | tee -a "$RELATORIO"
