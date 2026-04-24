@@ -1,0 +1,140 @@
+#!/usr/bin/env bashAdd commentMore actions
+
+set -euo pipefail
+
+LOG_FILE="usuario_leitura_iqnus.log"
+echo "########################################################" | tee -a "$LOG_FILE"
+echo "      Criação de Usuário de Leitura no PostgreSQL       " | tee -a "$LOG_FILE"
+echo "########################################################" | tee -a "$LOG_FILE"
+
+read -p "Digite o termo de liberação: " termo_liberacao
+
+
+read -s -p "Senha do usuário postgres: " PGPASSWORD
+echo
+export PGPASSWORD
+
+usuario="leitura_iqnus"
+senha=$(openssl rand -base64 12 | tr -d /=+ | cut -c1-12)
+
+echo "Senha gerada automaticamente para o usuário $usuario: $senha"
+
+
+
+# Carrega variáveis do sistema
+source /etc/wildfly.conf
+
+
+
+# === CAPTURAR IP PÚBLICO (via serviço externo) ===
+IP_PUBLICO=$(curl -s https://api.ipify.org)
+
+# Validação
+if [[ -z "${END_SERVIDOR:-}" || -z "${CHINCHILA_DS_DATABASENAME:-}" ]]; then
+  echo "Erro: END_SERVIDOR ou CHINCHILA_DS_DATABASENAME não definidos." | tee -a "$LOG_FILE"
+  exit 1
+fi
+
+echo "[INFO] Criando usuário no banco de dados..." | tee -a "$LOG_FILE"
+
+# Bloco PL/pgSQL
+psql -X -h "$END_SERVIDOR" -U postgres -d "$CHINCHILA_DS_DATABASENAME" <<EOF
+DO \$\$
+DECLARE
+  usuario varchar := '$usuario';
+  senha varchar := '$senha';
+BEGIN
+  IF (usuario = 'definir' OR senha = 'definir') THEN
+    RAISE EXCEPTION 'As variáveis usuario e senha precisam ser definidas!';
+  END IF;
+
+  IF (length(usuario) < 5 OR length(senha) < 4) THEN
+    RAISE EXCEPTION 'O usuário deve ter no mínimo 5 caracteres e a senha 4';
+  END IF;
+
+  IF (usuario !~ '^[0-9_a-zA-Z]+\$') THEN
+    RAISE EXCEPTION 'Usar apenas números, letras sem acentuação e _ para o nome do usuário';
+  END IF;
+
+  EXECUTE format('DROP ROLE IF EXISTS %I', usuario);
+  EXECUTE format('CREATE ROLE %I LOGIN PASSWORD ''%s'' NOSUPERUSER INHERIT NOCREATEDB NOCREATEROLE CONNECTION LIMIT 20', usuario, senha);
+  EXECUTE format('REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM %I', usuario);
+  EXECUTE format('GRANT SELECT ON ALL TABLES IN SCHEMA public TO %I', usuario);
+  EXECUTE format('ALTER DEFAULT PRIVILEGES FOR USER chinchila IN SCHEMA public GRANT SELECT ON TABLES TO %I', usuario);
+END
+\$\$;
+EOF
+
+# Detecta versão PostgreSQL
+PG_DATA=$(ps aux | grep -oP '^postgres .*postmaster.*-D *\K.*')
+PG_VERSION=$(cat $PG_DATA/PG_VERSION)
+cd "$PG_DATA"
+
+# Remove entradas antigas
+#sed -i "/$usuario/d" pg_hba.conf
+
+# Adiciona nova entrada
+if [[ "$PG_VERSION" == "14" || "$PG_VERSION" < "14" ]]; then
+  echo "# LEITURA IQNUS" >> pg_hba.conf
+  echo "host    all     $usuario    samenet    scram-sha-256" >> pg_hba.conf
+else
+  echo "host    all     $usuario    samenet    md5" >> pg_hba.conf
+fi
+# Adiciona nova entrada
+if [[ "$PG_VERSION" == "14" || "$PG_VERSION" < "14" ]]; then
+
+  echo "host    all     $usuario    138.121.120.254/32    scram-sha-256" >> pg_hba.conf
+else
+  echo "host    all     $usuario    138.121.120.254/32    md5" >> pg_hba.conf
+fi
+
+# Recarrega PostgreSQL
+echo "[INFO] Recarregando PostgreSQL..." | tee -a "$LOG_FILE"
+service postgresql-$PG_VERSION reload
+
+# Teste de conexão SELECT na tabela UNIDADENEGOCIO
+echo "[INFO] Testando acesso com SELECT * FROM UNIDADENEGOCIO" | tee -a "$LOG_FILE"
+if PGPASSWORD="$senha" psql -X -h "$END_SERVIDOR" -U "$usuario" -d "$CHINCHILA_DS_DATABASENAME" -c "SELECT * FROM UNIDADENEGOCIO LIMIT 1;" > /dev/null 2> erro.log; then
+  echo "" | tee -a "$LOG_FILE"
+  echo "✅ Usuário criado e acesso validado com sucesso!" | tee -a "$LOG_FILE"
+  echo "Usuário: $usuario" | tee -a "$LOG_FILE"
+  echo "Senha: $senha" | tee -a "$LOG_FILE"
+  echo "IP Servidor Local: $END_SERVIDOR  -  (Caso a conexão à base seja feita no mesmo ambiente de rede) " | tee -a "$LOG_FILE "
+  echo "IP Servidor Público: $IP_PUBLICO  -  (Caso a conexão à base seja feita de outro ambiente de rede) " | tee -a "$LOG_FILE  "
+  echo "Base: $CHINCHILA_DS_DATABASENAME" | tee -a "$LOG_FILE"
+  echo "Versão PostgreSQL: $PG_VERSION" | tee -a "$LOG_FILE"
+  echo "Porta: 5432" | tee -a "$LOG_FILE"
+  echo " Termo de liberação informado: $termo_liberacao" | tee -a "$LOG_FILE"
+  echo "- Observações Porta 5432:
+
+Deve 'chegar' pelo Link de internet e ser roteada/encaminhada para o IP Servidor local. Esse roteamento deve ser feito pele TI Local ou responsável pelo ambiente de rede
+
+Para acessos externos ao ambiente de rede local, o IP Servidor Público (ou DDNs) deve ser configurado na conexão remota.
+Essa configuração é feita pelo usuário que irá fazer o acesso.
+Não nos responsabilizamos por roteamentos NAT, onde a porta de origem da conexão seja diferente da porta 5432. Ex: 5444 (externo) > 5432 (Interno).
+
+."
+  echo "============================================="
+  echo "" | tee -a "$LOG_FILE"
+  read -p "Pressione ENTER para encerrar..."
+
+else
+  echo "" | tee -a "$LOG_FILE"
+  echo "❌ Falha na execução do SELECT com o novo usuário!" | tee -a "$LOG_FILE"
+  cat erro.log | tee -a "$LOG_FILE"
+  echo ""
+  read -p "Deseja desfazer o processo? [s/N]: " resposta
+
+  if [[ "$resposta" =~ ^[sS]$ ]]; then
+    echo "[INFO] Revertendo criação do usuário..." | tee -a "$LOG_FILE"
+    psql -X -h "$END_SERVIDOR" -U postgres -d "$CHINCHILA_DS_DATABASENAME" -c "DROP ROLE IF EXISTS \"$usuario\";"
+    sed -i "/$usuario/d" pg_hba.conf
+    service postgresql-$PG_VERSION reload
+    echo "Rollback concluído." | tee -a "$LOG_FILE"
+  else
+    echo ""
+    echo "⚠️  ATENÇÃO, PROCESSO FINALIZADO COM FALHAS" | tee -a "$LOG_FILE"
+    echo "Erro encontrado:" | tee -a "$LOG_FILE"
+    cat erro.log | tee -a "$LOG_FILE"
+  fi
+fi
